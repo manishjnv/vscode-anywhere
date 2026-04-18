@@ -1,0 +1,35 @@
+# ============================================================================
+# cloudflared-config.yml — Cloudflare Tunnel config (template)
+# ----------------------------------------------------------------------------
+# Place at: C:\Users\<you>\.cloudflared\config.yml
+#
+# Prereqs:
+#   1. Install cloudflared for Windows:
+#        winget install --id Cloudflare.cloudflared
+#   2. Log into your Cloudflare account:
+#        cloudflared tunnel login
+#   3. Create a named tunnel (gives you a tunnel UUID and credentials JSON):
+#        cloudflared tunnel create dev-tunnel
+#   4. Create the DNS route on Cloudflare for your hostname:
+#        cloudflared tunnel route dns dev-tunnel dev.yourdomain.com
+#   5. Edit the placeholders below, then test with:
+#        cloudflared tunnel run dev-tunnel
+# ============================================================================
+
+# The tunnel UUID from `cloudflared tunnel create dev-tunnel`
+tunnel: REPLACE_WITH_YOUR_TUNNEL_UUID
+
+# Path to the credentials file that `tunnel create` wrote.
+# On Windows this lives under C:\Users\<you>\.cloudflared\<UUID>.json
+credentials-file: C:\Users\REPLACE_WITH_YOUR_USERNAME\.cloudflared\REPLACE_WITH_YOUR_TUNNEL_UUID.json
+
+# Ingress rules — Cloudflare terminates TLS at the edge and forwards
+# to your local origin over the tunnel. We use 127.0.0.1 (NOT localhost)
+# because WSL2's localhost-forwarding is IPv4-only.
+ingress:
+  # Route your hostname to code-server running inside WSL
+  - hostname: dev.yourdomain.com
+    service: http://127.0.0.1:8081
+
+  # Required catch-all. Returns 404 to any request that doesn't match above.
+  - service: http_status:404

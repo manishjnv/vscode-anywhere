@@ -1,0 +1,29 @@
+# Logs
+*.log
+startup.log
+code-server.log
+
+# Credentials - NEVER commit these
+*.pem
+*-credentials.json
+.cloudflared/
+
+# Local overrides
+config.local.yml
+config.local.yaml
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor junk
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Backup files
+*.bak
+*.backup
+*~

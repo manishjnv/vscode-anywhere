@@ -1,0 +1,25 @@
+# ============================================================================
+# code-server config.yaml
+# ----------------------------------------------------------------------------
+# Place at: /home/<user>/.config/code-server/config.yaml
+#
+# bind-addr: 0.0.0.0:8081
+#   code-server listens on all interfaces inside WSL. WSL2's localhost-
+#   forwarding exposes this to Windows at 127.0.0.1:8081.
+#
+# auth: none
+#   WE INTENTIONALLY DISABLE code-server's built-in password auth.
+#   Authentication is handled at the EDGE by Cloudflare Access (Google SSO).
+#   This is the standard pattern for tunnel-fronted code-server and is safe
+#   BECAUSE Cloudflare Access enforces auth before any request reaches your
+#   laptop. DO NOT use auth: none without a front-door policy. See
+#   docs/SECURITY.md for the full reasoning.
+#
+# cert: false
+#   TLS is terminated at the Cloudflare edge. The last hop (tunnel ->
+#   127.0.0.1) is on the local machine, so plaintext HTTP is fine.
+# ============================================================================
+
+bind-addr: 0.0.0.0:8081
+auth: none
+cert: false
