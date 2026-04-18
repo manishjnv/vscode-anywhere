@@ -2,15 +2,42 @@
 
 > Turn your Windows laptop into a personal dev cloud. Access your development environment from any browser, anywhere, secured with Google SSO — no VPN, no paid SaaS, no code leaving your machine.
 
+## Architecture at a glance
+
+```mermaid
+flowchart LR
+    subgraph Anywhere["Anywhere on the internet"]
+        B[Browser<br/>phone · tablet · laptop]
+    end
+
+    subgraph CF["Cloudflare edge"]
+        A[Cloudflare Access<br/>Google SSO + TLS]
+    end
+
+    subgraph Home["Your Windows laptop at home"]
+        T[cloudflared<br/>outbound tunnel]
+        subgraph WSL["WSL2"]
+            CS[code-server<br/>:8081]
+            FS[(Project files<br/>/mnt/e/code)]
+            CC[Claude Code CLI<br/>Docker · git · node]
+        end
+    end
+
+    B -- "HTTPS" --> A
+    A -- "QUIC tunnel" --> T
+    T -- "127.0.0.1:8081" --> CS
+    CS --- FS
+    CS --- CC
+
+    classDef edge fill:#f38020,stroke:#000,color:#fff
+    classDef host fill:#0078d4,stroke:#000,color:#fff
+    classDef wsl fill:#4e9a06,stroke:#000,color:#fff
+    class A edge
+    class T host
+    class CS,FS,CC wsl
 ```
-[Any Browser]  →  Cloudflare Edge  →  Google SSO (Cloudflare Access)
-                                              ↓
-                                        cloudflared tunnel
-                                              ↓
-                        Windows laptop (localhost:8081)
-                                              ↓
-                                WSL2 → code-server → your project files
-```
+
+**Zero inbound ports** on your router — the tunnel is outbound-only. **Zero code** leaves your laptop — Cloudflare only transports encrypted traffic. **Zero passwords** to manage — Google SSO handles auth at the edge.
 
 Open `https://dev.yourdomain.com` on a phone, a Chromebook, a friend's laptop — anything with a browser — authenticate with your Google account, and you're inside VS Code editing the exact same files you left open on your home machine. Claude Code, Docker, extensions, terminal, everything.
 
@@ -27,6 +54,7 @@ Open `https://dev.yourdomain.com` on a phone, a Chromebook, a friend's laptop �
 ## Who this is for
 
 Developers who:
+
 - Work on a Windows desktop or laptop and occasionally want to code from somewhere else without lugging the machine
 - Want a "GitHub Codespaces-like" experience on hardware they already own
 - Are comfortable with PowerShell, WSL2, and basic networking
@@ -49,7 +77,7 @@ Developers who:
 
 ## Repository layout
 
-```
+```text
 .
 ├── windows/                    # Files that live on Windows
 │   ├── auto-start.ps1          # PowerShell orchestration script
