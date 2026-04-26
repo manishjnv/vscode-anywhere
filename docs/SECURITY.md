@@ -49,7 +49,7 @@ If you use `claude --dangerously-skip-permissions` (or `bypass permissions on` i
 
 5. **Enable Cloudflare Access audit logs** to see who's signing in.
 
-6. **Review `/tmp/code-server.log` and `E:\code\startup.log` periodically** for anything weird.
+6. **Review `/tmp/code-server.log` and `E:\code\remote-vscode-wsl-cloudflare\logs\startup.log` periodically** for anything weird.
 
 7. **Keep code-server, cloudflared, and your WSL distro updated.** These are the three most important pieces to patch.
 

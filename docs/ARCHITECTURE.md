@@ -89,7 +89,7 @@ Start-Sleep 30   # absorbs WSL/network cold-boot lag
 READY -> https://dev.yourdomain.com
 ```
 
-Each stage retries on failure. If the whole chain fails, `FAILED: <message>` goes to `E:\code\startup.log` and you can re-run manually.
+Each stage retries on failure. If the whole chain fails, `FAILED: <message>` goes to `E:\code\remote-vscode-wsl-cloudflare\logs\startup.log` and you can re-run manually.
 
 ## Why each component was chosen
 

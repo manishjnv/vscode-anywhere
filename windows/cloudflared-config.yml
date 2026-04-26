@@ -33,3 +33,9 @@ ingress:
 
   # Required catch-all. Returns 404 to any request that doesn't match above.
   - service: http_status:404
+
+# Optional: capture cloudflared's own log to the repo logs directory so
+# tunnel errors are diagnosable alongside the watchdog and code-server logs.
+# Uncomment and adjust the path to match your deployment.
+# loglevel: info
+# logfile: E:\code\remote-vscode-wsl-cloudflare\logs\cloudflared.log

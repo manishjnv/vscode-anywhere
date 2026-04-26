@@ -17,7 +17,7 @@ Issues and PRs welcome. This setup was built for one person's workflow, so there
    - WSL distro and version (`wsl --version`, `wsl -d <distro> -e lsb_release -a`)
    - code-server version (`code-server --version`)
    - cloudflared version (`cloudflared --version`)
-   - Relevant logs from `E:\code\startup.log` and `/tmp/code-server.log`
+   - Relevant logs from `E:\code\remote-vscode-wsl-cloudflare\logs\startup.log`, `E:\code\remote-vscode-wsl-cloudflare\logs\health-check.log`, and `/tmp/code-server.log`
 
 ## Security disclosures
 

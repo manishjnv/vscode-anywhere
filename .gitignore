@@ -2,15 +2,42 @@
 *.log
 startup.log
 code-server.log
+logs/
 
 # Credentials - NEVER commit these
 *.pem
+*.key
+*.crt
+*.p12
+*.pfx
 *-credentials.json
+credentials*.json
+secrets.*
 .cloudflared/
+
+# Env files (API keys, tokens, etc.)
+.env
+.env.*
+!.env.example
+
+# SSH keys (in case anyone drops them in the workspace)
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+*.pub
+
+# Cloud / AI tool configs that may carry tokens
+.aws/
+.ssh/
+.anthropic/
+.claude.json
+.claude-config.json
 
 # Local overrides
 config.local.yml
 config.local.yaml
+auto-start.config.ps1
 
 # OS junk
 .DS_Store

@@ -122,7 +122,7 @@ Edit the CONFIG section at the top to match your setup:
 $WSL_USER = "admin"                 # Your WSL username
 $PORT     = 8081                    # code-server port
 $TUNNEL   = "dev-tunnel"            # Your tunnel name
-$LOG      = "E:\code\startup.log"   # Where to write the transcript
+$LOG      = "E:\code\remote-vscode-wsl-cloudflare\logs\startup.log"   # Where to write the transcript
 ```
 
 Also change the `READY -> https://dev.yourdomain.com` line near the bottom to your hostname — it's cosmetic but nice to have in the log.
@@ -136,7 +136,7 @@ powershell -ExecutionPolicy Bypass -File E:\code\auto-start.ps1
 Watch the log:
 
 ```powershell
-Get-Content E:\code\startup.log -Tail 30
+Get-Content E:\code\remote-vscode-wsl-cloudflare\logs\startup.log -Tail 30
 ```
 
 You should see all stages pass on attempt 1 and end with `READY -> https://...`. If not, check [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

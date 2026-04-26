@@ -65,6 +65,9 @@ Developers who:
 - 📘 [Full setup guide](docs/SETUP.md) — step-by-step, ~45 minutes end to end
 - 🏗️ [Architecture](docs/ARCHITECTURE.md) — how the pieces fit together
 - 🔒 [Security notes](docs/SECURITY.md) — what's protected and what isn't
+- 🩺 [Monitoring & auto-heal](docs/MONITORING.md) — the watchdog that keeps the stack up
+- 🧱 [Reliability](docs/RELIABILITY.md) — per-component failure modes and permanent solutions
+- 🧪 [RCA log](docs/RCA.md) — every bug fixed, with root cause and prevention
 - 🛠️ [Troubleshooting](docs/TROUBLESHOOTING.md) — every error I hit and how I fixed it
 - ❓ [FAQ](docs/FAQ.md)
 

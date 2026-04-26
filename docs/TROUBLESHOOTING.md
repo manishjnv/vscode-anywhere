@@ -218,7 +218,7 @@ Yes. Any mobile browser works. code-server's UI is usable but cramped on phones 
 
 Check in this order:
 
-1. `E:\code\startup.log` — the PowerShell transcript
+1. `E:\code\remote-vscode-wsl-cloudflare\logs\startup.log` — the PowerShell transcript
 2. `/tmp/code-server.log` inside WSL — code-server's output
 3. `cloudflared` logs — `Get-EventLog Application -Source cloudflared` on Windows, or run `cloudflared tunnel run dev-tunnel` in the foreground to see live
 4. Cloudflare Zero Trust → Logs → Access — authentication failures
