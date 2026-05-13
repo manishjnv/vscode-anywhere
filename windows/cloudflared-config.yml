@@ -30,12 +30,18 @@ ingress:
   # Route your hostname to code-server running inside WSL
   - hostname: dev.yourdomain.com
     service: http://127.0.0.1:8081
+    # Forces stale pooled origin TCP connections to drop after 30s (relevant
+    # after laptop sleep/wake). connectTimeout caps origin TCP-connect at 10s
+    # so a hung WSL cannot stall edge requests for cloudflared's 30s default.
+    originRequest:
+      keepAliveTimeout: 30s
+      connectTimeout: 10s
 
   # Required catch-all. Returns 404 to any request that doesn't match above.
   - service: http_status:404
 
-# Optional: capture cloudflared's own log to the repo logs directory so
-# tunnel errors are diagnosable alongside the watchdog and code-server logs.
-# Uncomment and adjust the path to match your deployment.
-# loglevel: info
-# logfile: E:\code\remote-vscode-wsl-cloudflare\logs\cloudflared.log
+# Capture cloudflared's own log so tunnel-side errors (public=timeout,
+# edge disconnects, origin connect failures) are diagnosable alongside the
+# watchdog and code-server logs. Adjust the path to match your deployment.
+loglevel: info
+logfile: E:\code\remote-vscode-wsl-cloudflare\logs\cloudflared.log

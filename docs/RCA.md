@@ -4,6 +4,79 @@ Each entry: symptom observed, root cause, fix landed, prevention so the same cla
 
 ---
 
+## RCA-010: PowerShell health-check task flashed a console window every 2 minutes (2026-05-13)
+
+**Symptom:** A PowerShell console window briefly appeared and disappeared every ~2 minutes on the desktop. Visible long enough to notice, too brief to interact with. Cause traced to the `Dev Environment Health Check` scheduled task firing on its 2-minute trigger.
+
+**Root cause:** task action was `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ...`. The `-WindowStyle Hidden` argument is *parsed* by PowerShell **after** `conhost.exe` has already created and shown the console window for the process. The Hide directive then applies, but only after a ~50-200 ms flash. This is documented PowerShell-on-Windows behavior, not a misconfiguration -- `powershell.exe -WindowStyle Hidden` cannot suppress the initial flash because the window creation precedes argument parsing.
+
+**Fix:**
+
+- Added [windows/run-hidden.vbs](../windows/run-hidden.vbs) -- a small VBScript shim that calls `WScript.Shell.Run "powershell ...", 0, False`. `intWindowStyle = 0` means "no window at all", and `wscript.exe` is a windowless host to begin with, so nothing flashes.
+- Updated the task action to `wscript.exe "...\run-hidden.vbs" "...\health-check.ps1"`. Verified the next two cycles ran silently with exit code 0 and continued writing `OK` entries to [logs/health-check.log](../logs/health-check.log).
+- Updated [docs/MONITORING.md](MONITORING.md) install snippet so future deployments use the shim from the start.
+
+**Prevention:** any scheduled task running a PowerShell script on a short interval (anything sub-hourly) must use the `wscript.exe + run-hidden.vbs` pattern, never raw `powershell -WindowStyle Hidden`. The latter looks correct, passes a code review, and *almost* works -- it's exactly the kind of paper-cut that gets ignored because each flash is too brief to debug in isolation. Codified in MONITORING.md alongside the install steps.
+
+---
+
+## RCA-009: cloudflared ingress used `localhost`, relying on IPv6-refused-then-IPv4 fallback (2026-05-13)
+
+**Symptom:** Live `C:\Users\<user>\.cloudflared\config.yml` had `service: http://localhost:8081` while the repo's `auto-start.ps1` deliberately used `http://127.0.0.1:8081` everywhere. Visible only as a comment-thread observation -- the tunnel was working end-to-end. But it surfaced during investigation of the 2026-05-11 `public=timeout` events as a candidate contributor.
+
+**Root cause:** Windows DNS Client returns BOTH records for `localhost`:
+
+```text
+localhost  AAAA  ::1
+localhost  A     127.0.0.1
+```
+
+This happens even when IPv6 is disabled on individual adapters (Wi-Fi in this case) -- because the host's loopback resolution is independent of adapter bindings, and there is no `DisabledComponents` system-wide IPv6 kill switch. The `hosts` file's `::1 localhost` entry is commented out by default but Windows DNS Client returns the AAAA record anyway from its internal resolver.
+
+WSL2's localhost-forwarding is IPv4-only. So a TCP connect to `[::1]:8081` gets an immediate TCP RST from the Windows network stack ("actively refused"). HTTP clients implementing happy-eyeballs (cloudflared's Go runtime, PowerShell's `Invoke-WebRequest`) transparently retry the A record (`127.0.0.1`) within ~1 ms and succeed.
+
+It worked, but on a fragile assumption: that the failure mode on `::1:8081` is always *fast TCP RST*, not *silent drop* or *timeout*. If anything (Windows firewall rule change, code-server later binding to `::1`, Windows update touching the loopback stack) flips that, every cloudflared origin connect picks up multi-second latency on the IPv6 attempt -- which would manifest as `public=timeout` from the watchdog's perspective even though everything is "alive". This is the same family as RCA-007: a probe answer changing meaning depending on something invisible.
+
+**Fix:** edited `C:\Users\manis\.cloudflared\config.yml` to use `service: http://127.0.0.1:8081`. Restarted cloudflared (PID rolled from 3284 → 10800). Both probes returned 200 immediately. The repo template at [windows/cloudflared-config.yml:32](../windows/cloudflared-config.yml#L32) already used `127.0.0.1`, so live and template are now aligned. Verified with `Resolve-DnsName localhost` (still returns both records, as expected) and `Invoke-WebRequest http://[::1]:8081` (still actively refused, as expected) -- the fix removes the dependency on the fallback, it doesn't change the underlying OS behavior.
+
+**Prevention:**
+
+- Stack-wide convention: all loopback URLs in this stack use the literal `127.0.0.1`, never `localhost`. Applies to cloudflared ingress, PowerShell probes, code-server listen address documentation, and any future component.
+- The comment block at [windows/auto-start.ps1:27-29](../windows/auto-start.ps1#L27-L29) already documents this for the PowerShell side. Mirror that rationale into the cloudflared template comments next time the file is touched so a future operator doesn't "fix" it back to `localhost` thinking it's more idiomatic.
+- "IPv6 is disabled" is rarely binary on Windows. Adapter-level binding toggles do not disable loopback IPv6 resolution. Verify with `Resolve-DnsName localhost` before assuming an IPv6 codepath is dead.
+
+---
+
+## RCA-008: `public=timeout` events on 2026-05-11 had no cloudflared-side log to diagnose against (2026-05-13)
+
+**Symptom:** Two UNHEALTHY watchdog events in the last 48 hours, both 2026-05-11:
+
+```text
+03:00:23  UNHEALTHY cloudflared=alive(PID=23328) origin=200 public=timeout
+03:01:59  STILL UNHEALTHY ...                                public=timeout
+03:10:22  UNHEALTHY ...                                      public=timeout
+03:10:29  RECOVERED  ...                                     public=200
+```
+
+Local stack was healthy throughout -- the cloudflared daemon was alive, code-server on `:8081` returned 200 locally, only the public URL through the Cloudflare edge timed out. The heal-flow during event #1 also surfaced 4 consecutive `Resolve-DnsName 1.1.1.1` timeouts, suggesting a simultaneous WAN flap. But the root cause -- "was this Cloudflare edge, our WAN, or origin TCP wobble?" -- could not be proven from the data captured.
+
+**Root cause:** monitoring captured "what failed at the local-probe layer" via `health-check.log`, but cloudflared's own logs (which would show edge disconnects, connection retries, registration churn, origin connect failures) were not being persisted. cloudflared was started by `auto-start.ps1`'s `Start-Process cloudflared` with no `--logfile` flag, and the config file at `C:\Users\<user>\.cloudflared\config.yml` did not enable file logging. The daemon's stdout went to the transient console of the elevated Start-Process invocation and was lost. So when public=timeout fired, the watchdog log proved *that* the public path was unreachable from this host, but had no paired tunnel-side log to disambiguate edge-vs-origin-vs-WAN.
+
+**Fix:**
+
+- Added `loglevel: info` + `logfile: E:\code\remote-vscode-wsl-cloudflare\logs\cloudflared.log` to live `C:\Users\manis\.cloudflared\config.yml`. Updated repo template [windows/cloudflared-config.yml](../windows/cloudflared-config.yml) so logging is enabled by default for future setups (it was previously a commented-out optional block).
+- Restarted cloudflared; verified the log now captures `Starting tunnel`, version, connector ID, protocol selection (`quic`), per-connection registration at Cloudflare PoPs (`blr03`, `bom12`), and tear-down events on restart.
+- Confirmed end-to-end signal: stopped previous PID, restarted, observed the QUIC connections cancel and re-register in the new log -- so the next genuine edge wobble will produce a paired entry.
+
+**Prevention:**
+
+- Any daemon whose health we monitor must persist its own logs to a known file location. The watchdog's `cloudflared=alive` boolean is necessary but not sufficient -- "alive" tells you the process exists, not that its tunnels are healthy.
+- For monitored-component health checks, the rule "probe must verify the layer it claims to verify" (RCA-007) has a sibling rule: "the monitored component must log enough of its own internal state to diagnose a failure that's invisible from the probe layer". A binary alive/dead probe + a verbose component log is the minimum diagnostic surface.
+- Codified the cloudflared logfile path in the repo template, so a future operator setting up from scratch gets logging by default rather than discovering its absence during an incident.
+- No code change was needed for the actual `public=timeout` failure mode -- the watchdog correctly identified that local services were healthy and skipped a destructive restart (a local restart cannot fix a Cloudflare-edge or WAN problem). The fix is purely diagnostic capture for next time.
+
+---
+
 ## RCA-007: Watchdog probe was checking the wrong layer; dead origin appeared healthy (2026-04-26)
 
 **Symptom:** During the first heal-flow demo, manually killed `cloudflared` (and later, code-server inside WSL). The public URL `https://dev.yourdomain.com` continued to return 200 for several minutes after both were dead. The watchdog dutifully logged `OK` every 2 minutes while the IDE was completely unreachable to a real user.

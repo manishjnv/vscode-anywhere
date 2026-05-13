@@ -49,9 +49,13 @@ See [RELIABILITY.md](RELIABILITY.md) for per-component failure modes and how the
 From an **elevated PowerShell** (admin):
 
 ```powershell
+# Use the .vbs shim so PowerShell starts with no console window at all -- the
+# raw `powershell -WindowStyle Hidden` flashes the console briefly every cycle
+# before the WindowStyle directive takes effect, producing a popup every 2
+# minutes. wscript + run-hidden.vbs avoids the flash entirely.
 $action = New-ScheduledTaskAction `
-    -Execute "powershell" `
-    -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "E:\code\remote-vscode-wsl-cloudflare\windows\health-check.ps1"' `
+    -Execute "wscript.exe" `
+    -Argument '"E:\code\remote-vscode-wsl-cloudflare\windows\run-hidden.vbs" "E:\code\remote-vscode-wsl-cloudflare\windows\health-check.ps1"' `
     -WorkingDirectory "E:\code\remote-vscode-wsl-cloudflare\windows"
 
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
@@ -133,16 +137,16 @@ All four log streams live in one directory (`<repo>/logs/`) for easy correlation
 | `logs/startup.log` | `auto-start.ps1` (logon + heal-time) | Full PowerShell transcript of every bring-up |
 | `logs/health-check.log` | `health-check.ps1` (every 2 min) | One line per probe; heal output prefixed with `heal>` |
 | `logs/code-server.log` | mirrored from WSL `/tmp/code-server.log` | code-server stdout/stderr; refreshed every cycle |
-| `logs/cloudflared.log` (optional) | `cloudflared` itself, when configured | Tunnel registration, edge connections, errors |
+| `logs/cloudflared.log` | `cloudflared` itself | Tunnel registration, edge connections, origin connect failures |
 
-To enable `cloudflared.log`, add two lines to `C:\Users\<you>\.cloudflared\config.yml`:
+`cloudflared.log` is enabled by default in the repo template ([windows/cloudflared-config.yml](../windows/cloudflared-config.yml)). The two relevant lines:
 
 ```yaml
 loglevel: info
 logfile: E:\code\remote-vscode-wsl-cloudflare\logs\cloudflared.log
 ```
 
-Then restart cloudflared (the watchdog will do this automatically on the next failure cycle, or you can `Stop-Process -Name cloudflared -Force` from elevated shell).
+If you're upgrading an existing deployment that did not have logging enabled, add those lines to `C:\Users\<you>\.cloudflared\config.yml` and restart cloudflared (`Stop-Process -Name cloudflared -Force` from elevated shell; the watchdog's next failure cycle will restart it).
 
 ### Log format
 
@@ -168,10 +172,36 @@ Per-probe failure values map to causes:
 
 ### Rotation
 
-- `health-check.log` rotates at ~10MB to `health-check.log.1`. One generation kept.
-- `startup.log` does not auto-rotate -- prune manually if it grows.
+- `health-check.log` rotates at ~10MB to `health-check.log.1`. One generation kept. Done in `health-check.ps1`.
+- `startup.log` rotates at ~10MB to `startup.log.1`. One generation kept. Done in `auto-start.ps1` before `Start-Transcript`.
 - `code-server.log` is overwritten on each cycle (it's a mirror, not an append log).
-- `cloudflared.log` rotation is managed by cloudflared itself (defaults are sensible).
+- `cloudflared.log` rotates at ~50MB to `cloudflared.log.1`. Done in `health-check.ps1`. Higher threshold because rotation requires stopping cloudflared to release the Windows file handle (~2-5s tunnel blip); the heal-flow auto-restarts it on the next probe cycle. cloudflared has no built-in rotation on Windows.
+
+## External heartbeat (dead-man's-switch)
+
+The local watchdog cannot detect its own non-execution. If Task Scheduler is disabled, the laptop is asleep, the disk is full, or `health-check.ps1` itself crashes silently, you find out by opening the URL and seeing it dead.
+
+`health-check.ps1` supports an optional outbound ping to [Healthchecks.io](https://healthchecks.io) (or any HTTP endpoint with the same `<url>` for OK and `<url>/fail` for failure semantics — Better Stack, Cronitor, a self-hosted endpoint, etc.). If the watchdog stops checking in, Healthchecks emails you.
+
+**Setup (one-time):**
+
+1. Sign up free at <https://healthchecks.io>.
+2. Create a check. Period: 5 minutes. Grace: 1 minute. Name: `Dev Environment`. Copy the "Ping URL".
+3. Edit `E:\code\auto-start.config.ps1`, set:
+
+   ```powershell
+   $HEALTHCHECK_URL = "https://hc-ping.com/<your-uuid>"
+   ```
+
+4. Next health-check cycle picks it up — no restart needed (the config is dot-sourced fresh every cycle).
+
+**Behavior:**
+
+- `OK` and `RECOVERED` cycles ping the bare URL → check shows as "up" with green dot.
+- `STILL UNHEALTHY` cycles ping `<url>/fail` → check goes red immediately.
+- Pings have a 5-second timeout and never affect the health-check result. A network blip to Healthchecks (which is the case you most want to alert on) silently fails the ping, and Healthchecks alerts you when no ping arrives in 5+ minutes.
+
+Leave `$HEALTHCHECK_URL = $null` to disable. Existing deployments that never set the variable continue to work unchanged.
 
 ## Operator playbook for failures the watchdog can't recover
 

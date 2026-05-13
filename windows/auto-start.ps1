@@ -53,12 +53,30 @@ if (-not (Test-Path $ConfigPath)) {
 }
 . $ConfigPath  # provides $WSL_USER, $WSL_DISTRO, $PORT, $TUNNEL, $PUBLIC_HOST, $LOG
 
+# Best-effort time resync. After a long sleep / battery drain the laptop clock
+# can drift by minutes; the first TLS handshake to Cloudflare then fails with
+# "cert not yet valid" or "expired", which the watchdog cannot distinguish
+# from a real outage. w32tm is silent on systems where the Time service is
+# disabled by policy; we swallow errors because this is a hardening step.
+try { & w32tm /resync /force 2>&1 | Out-Null } catch {}
+
 # Make sure the log directory exists BEFORE Start-Transcript, otherwise a
 # missing parent dir on first boot would abort the script with no transcript.
 $logDir = Split-Path $LOG
 if (-not (Test-Path $logDir)) {
     New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 }
+
+# Cheap log rotation: mirrors the pattern in health-check.ps1. Without this,
+# Start-Transcript -Append grows the file indefinitely; observed ~800KB over
+# 4 months and there is no upper bound. 10MB cap with a single .1 archive
+# keeps roughly the last 1-2 months of detailed heal transcripts.
+if ((Test-Path $LOG) -and ((Get-Item $LOG).Length -gt 10MB)) {
+    $archive = "$LOG.1"
+    if (Test-Path $archive) { Remove-Item $archive -Force }
+    Rename-Item $LOG $archive
+}
+
 Start-Transcript -Path $LOG -Append | Out-Null
 
 function Retry($action, $name, $max = 5) {

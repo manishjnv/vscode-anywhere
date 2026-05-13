@@ -42,6 +42,7 @@ if (-not (Test-Path $ConfigPath)) {
 $logDir     = Split-Path $LOG
 $LOG_HEALTH = Join-Path $logDir "health-check.log"
 $LOG_CS     = Join-Path $logDir "code-server.log"
+$LOG_CF     = Join-Path $logDir "cloudflared.log"
 if (-not (Test-Path $logDir)) {
     New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 }
@@ -55,6 +56,48 @@ if ((Test-Path $LOG_HEALTH) -and ((Get-Item $LOG_HEALTH).Length -gt 10MB)) {
 
 function Write-Log($msg) {
     "$(Get-Date -Format o) $msg" | Out-File -FilePath $LOG_HEALTH -Append -Encoding ascii
+}
+
+function Invoke-CloudflaredLogRotation {
+    # cloudflared has no built-in log rotation. Threshold is higher than the
+    # watchdog's own log because rotation requires stopping the daemon to
+    # release the file handle on Windows (~2-5s tunnel blip). We accept ~50MB
+    # of disk before paying that cost. The next health probe after rotation
+    # detects cloudflared=DEAD and the standard heal-flow brings it back up.
+    if (-not (Test-Path $LOG_CF)) { return }
+    if ((Get-Item $LOG_CF).Length -le 50MB) { return }
+
+    Write-Log "ROTATE cloudflared.log >50MB -- stopping cloudflared to release handle"
+    $archive = "$LOG_CF.1"
+    if (Test-Path $archive) { Remove-Item $archive -Force }
+
+    $proc = Get-Process cloudflared -ErrorAction SilentlyContinue
+    if ($proc) {
+        try { $proc | Stop-Process -Force; Start-Sleep 2 }
+        catch {
+            Write-Log "ROTATE: could not stop cloudflared ($($_.Exception.Message)) -- skipping rotation"
+            return
+        }
+    }
+    try {
+        Rename-Item $LOG_CF $archive -Force
+        Write-Log "ROTATE complete -- next probe will trigger heal to restart cloudflared"
+    } catch {
+        Write-Log "ROTATE rename failed: $($_.Exception.Message)"
+    }
+}
+
+function Send-Heartbeat($state) {
+    # Dead-man's-switch ping to Healthchecks.io (or any compatible service).
+    # If no $HEALTHCHECK_URL is configured, this is a no-op.
+    # State: 'ok' for healthy/recovered, 'fail' for STILL UNHEALTHY.
+    # The heartbeat call must NEVER affect health-check itself -- a network
+    # blip to healthchecks.io is the case we most want to alert on, and
+    # silently failing to ping is the correct behavior (next cycle will
+    # succeed, or the external monitor will alert when no ping arrives).
+    if (-not $HEALTHCHECK_URL) { return }
+    $url = if ($state -eq 'fail') { "$HEALTHCHECK_URL/fail" } else { $HEALTHCHECK_URL }
+    try { Invoke-WebRequest $url -TimeoutSec 5 -UseBasicParsing | Out-Null } catch {}
 }
 
 function Get-HttpStatusOrError($url, $timeoutSec) {
@@ -119,10 +162,12 @@ function Update-CodeServerLogMirror {
 # ===== main flow ============================================================
 
 Update-CodeServerLogMirror
+Invoke-CloudflaredLogRotation
 
 $h = Get-StackHealth
 if ($h.Healthy) {
     Write-Log "OK $($h.Summary)"
+    Send-Heartbeat 'ok'
     exit 0
 }
 
@@ -134,6 +179,7 @@ try {
     $healExit = $LASTEXITCODE
 } catch {
     Write-Log "HEAL EXCEPTION: $($_.Exception.Message)"
+    Send-Heartbeat 'fail'
     exit 1
 }
 
@@ -143,8 +189,10 @@ Update-CodeServerLogMirror
 $h = Get-StackHealth
 if ($h.Healthy) {
     Write-Log "RECOVERED $($h.Summary) (heal exit=$healExit)"
+    Send-Heartbeat 'ok'
     exit 0
 } else {
     Write-Log "STILL UNHEALTHY $($h.Summary) (heal exit=$healExit) -- will retry next cycle"
+    Send-Heartbeat 'fail'
     exit 1
 }
