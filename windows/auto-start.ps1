@@ -133,7 +133,19 @@ function Test-PublicTunnel {
 }
 
 function Wait-Network {
-    Retry { Resolve-DnsName 1.1.1.1 -ErrorAction Stop | Out-Null } "DNS Ready" 10
+    # TCP-connect probe to 1.1.1.1:443 instead of `Resolve-DnsName 1.1.1.1`.
+    # The PTR-lookup approach was observed to time out for 16+ seconds per
+    # attempt during the 2026-05-11 WAN flap (see RCA-008) -- with 10 retries
+    # that's 160+ seconds of idle time on a script that has nothing else to
+    # do until the network is up. Test-NetConnection -Port 443 fails in
+    # ~1 second when unreachable and succeeds in <100 ms when up. Same
+    # signal ("can we reach the public internet"), one-tenth the latency
+    # on the failure path.
+    Retry {
+        $ok = Test-NetConnection -ComputerName 1.1.1.1 -Port 443 `
+                  -InformationLevel Quiet -WarningAction SilentlyContinue
+        if (-not $ok) { throw "TCP connect to 1.1.1.1:443 failed" }
+    } "Network Ready" 10
 }
 
 function Invoke-WSL($cmd) {
