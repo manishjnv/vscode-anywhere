@@ -138,6 +138,7 @@ All four log streams live in one directory (`<repo>/logs/`) for easy correlation
 | `logs/health-check.log` | `health-check.ps1` (every 2 min) | One line per probe; heal output prefixed with `heal>` |
 | `logs/code-server.log` | mirrored from WSL `/tmp/code-server.log` | code-server stdout/stderr; refreshed every cycle |
 | `logs/cloudflared.log` | `cloudflared` itself | Tunnel registration, edge connections, origin connect failures |
+| `logs/failure-<ts>.txt` | `health-check.ps1` on UNHEALTHY | One file per failure: network adapters, DNS resolvers, routes, TCP reachability, cloudflared metrics, last 5 min of Windows event log |
 
 `cloudflared.log` is enabled by default in the repo template ([windows/cloudflared-config.yml](../windows/cloudflared-config.yml)). The two relevant lines:
 
@@ -150,13 +151,23 @@ If you're upgrading an existing deployment that did not have logging enabled, ad
 
 ### Log format
 
-`health-check.log` records each probe with concrete values, not booleans -- so failures are diagnosable from the log alone:
+`health-check.log` records each probe with concrete values, not booleans -- so failures are diagnosable from the log alone. Every line also carries a compact cloudflared metrics suffix (`mx=...`) for trend analysis:
 
 ```text
-2026-04-26T20:51:28 OK cloudflared=alive(PID=26696) origin=200 public=200
-2026-04-26T20:53:30 UNHEALTHY cloudflared=DEAD origin=conn-refused public=200 -- invoking auto-start.ps1 -NoLogonDelay
-2026-04-26T20:53:42 RECOVERED cloudflared=alive(PID=12345) origin=200 public=200 (heal exit=0)
+2026-05-13T07:26:47 OK cloudflared=alive(PID=19208) origin=200 public=200 mx=reqs:35 errs:0 ha:3 proxyerr:0
+2026-04-26T20:53:30 UNHEALTHY cloudflared=DEAD origin=conn-refused public=200 mx=down -- invoking auto-start.ps1 -NoLogonDelay
+2026-04-26T20:53:42 RECOVERED cloudflared=alive(PID=12345) origin=200 public=200 mx=reqs:36 errs:0 ha:3 proxyerr:0 (heal exit=0)
 ```
+
+The `mx=` fields come from cloudflared's Prometheus endpoint at `127.0.0.1:20241/metrics`:
+
+| Field | Counter | Watch for |
+|---|---|---|
+| `reqs` | `cloudflared_tunnel_total_requests` | Cumulative; should only grow |
+| `errs` | `cloudflared_tunnel_request_errors` | Origin-side errors; non-zero deltas precede `public=timeout` |
+| `ha` | `cloudflared_tunnel_ha_connections` | Active edge connections; expect 3 (one per Cloudflare PoP) |
+| `proxyerr` | `cloudflared_proxy_connect_streams_errors` | Proxy-layer connect failures; non-zero is concerning |
+| `mx=down` | (endpoint unreachable) | cloudflared is dead |
 
 Per-probe failure values map to causes:
 
@@ -169,6 +180,19 @@ Per-probe failure values map to causes:
 | `tls-error` | TLS handshake or cert validation failed |
 | `5xx` (e.g., `503`, `530`) | Upstream returned an error -- often Cloudflare can't reach origin |
 | `ERR:<TypeName>` | Unexpected exception; check the .NET type for the actual cause |
+
+### Failure snapshots
+
+When `health-check.ps1` detects UNHEALTHY, before invoking heal it writes one file to `logs/failure-<yyyyMMdd-HHmmss>.txt` containing:
+
+- All network adapters (Status, LinkSpeed, MediaConnectionState)
+- DNS resolvers per interface
+- Default route / gateway
+- TCP reachability checks to `1.1.1.1:443`, `8.8.8.8:443`, `cloudflare.com:443`
+- Full cloudflared metrics snapshot (key counters)
+- Last 5 minutes of Windows Event Log entries from System (Warnings+Errors only, NVIDIA RTD3 noise filtered) plus DNS-Client, NetworkProfile, NCSI, WLAN-AutoConfig channels
+
+This closes the diagnostic gap from RCA-008: the 2026-05-11 `public=timeout` events were undiagnosable because we had no network-state snapshot at the moment of failure. Files only land on UNHEALTHY events (rare). Prune manually if they pile up after sustained outages.
 
 ### Rotation
 

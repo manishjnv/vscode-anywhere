@@ -100,6 +100,148 @@ function Send-Heartbeat($state) {
     try { Invoke-WebRequest $url -TimeoutSec 5 -UseBasicParsing | Out-Null } catch {}
 }
 
+function Get-CloudflaredMetricsSummary {
+    # Scrape cloudflared's Prometheus metrics endpoint and extract a few
+    # high-signal counters. Appended to every OK / UNHEALTHY / RECOVERED log
+    # line so we can chart tunnel-side errors over time and spot a counter
+    # spike that precedes a user-visible failure. Best-effort; if the
+    # endpoint is unreachable (cloudflared dead), returns "metrics=down".
+    try {
+        $r = Invoke-WebRequest 'http://127.0.0.1:20241/metrics' `
+                 -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
+        $lines = $r.Content -split "`n"
+        $reqs   = ($lines | Where-Object { $_ -match '^cloudflared_tunnel_total_requests\s+(\d+)' }   | ForEach-Object { $matches[1] } | Select-Object -First 1)
+        $errs   = ($lines | Where-Object { $_ -match '^cloudflared_tunnel_request_errors\s+(\d+)' }   | ForEach-Object { $matches[1] } | Select-Object -First 1)
+        $ha     = ($lines | Where-Object { $_ -match '^cloudflared_tunnel_ha_connections\s+(\d+)' }   | ForEach-Object { $matches[1] } | Select-Object -First 1)
+        $procErr= ($lines | Where-Object { $_ -match '^cloudflared_proxy_connect_streams_errors\s+(\d+)' } | ForEach-Object { $matches[1] } | Select-Object -First 1)
+        return "mx=reqs:${reqs} errs:${errs} ha:${ha} proxyerr:${procErr}"
+    } catch {
+        return "mx=down"
+    }
+}
+
+function Capture-FailureSnapshot($summary) {
+    # Forensic dump produced once per UNHEALTHY detection, before invoking
+    # heal. The 2026-05-11 public=timeout events were undiagnosable in
+    # hindsight because we had no network-state snapshot at the moment of
+    # failure. Each snapshot is one timestamped file in logs/failure-*.txt.
+    # On a healthy stack this is never written; on an unhealthy one it's
+    # ~10-30KB of text covering everything an incident-responder would need.
+    $ts  = Get-Date -Format "yyyyMMdd-HHmmss"
+    $out = Join-Path $logDir "failure-$ts.txt"
+    $sb  = New-Object System.Text.StringBuilder
+
+    function Add($t) { [void]$sb.AppendLine($t) }
+
+    Add "=== Failure Snapshot $((Get-Date).ToString('o')) ==="
+    Add "Trigger: $summary"
+    Add ""
+
+    Add "=== Network Adapters ==="
+    try { Add ((Get-NetAdapter | Format-Table Name, Status, LinkSpeed, MediaConnectionState -AutoSize | Out-String).TrimEnd()) }
+    catch { Add "ERR: $($_.Exception.Message)" }
+    Add ""
+
+    Add "=== DNS Resolvers (IPv4) ==="
+    try { Add ((Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object ServerAddresses | Format-Table InterfaceAlias, ServerAddresses -AutoSize | Out-String).TrimEnd()) }
+    catch { Add "ERR: $($_.Exception.Message)" }
+    Add ""
+
+    Add "=== Default Route / Gateway ==="
+    try { Add ((Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop | Format-Table InterfaceAlias, NextHop, RouteMetric -AutoSize | Out-String).TrimEnd()) }
+    catch { Add "ERR: $($_.Exception.Message)" }
+    Add ""
+
+    Add "=== TCP Reachability Tests ==="
+    foreach ($target in @(
+        @{H='1.1.1.1';      P=443},
+        @{H='8.8.8.8';      P=443},
+        @{H='cloudflare.com'; P=443}
+    )) {
+        $ok = $false
+        try {
+            $ok = Test-NetConnection -ComputerName $target.H -Port $target.P `
+                      -InformationLevel Quiet -WarningAction SilentlyContinue
+        } catch {}
+        Add ("{0,-20} -> {1}" -f "$($target.H):$($target.P)", $ok)
+    }
+    Add ""
+
+    Add "=== cloudflared metrics (key counters) ==="
+    try {
+        $r = Invoke-WebRequest 'http://127.0.0.1:20241/metrics' -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
+        $r.Content -split "`n" |
+            Where-Object {
+                $_ -match '^cloudflared_(tunnel_total_requests|tunnel_request_errors|tunnel_ha_connections|tunnel_concurrent|tunnel_response_by_code|tunnel_tunnel_register_fail|proxy_connect_streams_errors|tcp_active_sessions|tcp_total_sessions|tunnel_server_locations)'
+            } |
+            ForEach-Object { Add $_ }
+    } catch {
+        Add "ERR: $($_.Exception.Message)  (cloudflared metrics endpoint unreachable -- daemon likely down)"
+    }
+    Add ""
+
+    Add "=== Windows Event Log slice (last 5 minutes, network-relevant only) ==="
+    $since = (Get-Date).AddMinutes(-5)
+
+    # Channel -> filter to keep noise out. The System channel in particular is
+    # dominated by GPU power-state and SCM messages on a typical laptop; we
+    # only want network/disk/kernel signals for incident diagnosis.
+    $channelConfig = @(
+        @{
+            Name      = 'System'
+            Levels    = @(1, 2, 3)   # Critical, Error, Warning -- skip Information noise
+            SkipIds   = @(9007, 9008) # NVIDIA RTD3 power-state churn
+            Providers = $null
+        },
+        @{ Name='Microsoft-Windows-DNS-Client/Operational';      Levels=$null; SkipIds=@(); Providers=$null },
+        @{ Name='Microsoft-Windows-NetworkProfile/Operational';  Levels=$null; SkipIds=@(); Providers=$null },
+        @{ Name='Microsoft-Windows-NCSI/Operational';            Levels=$null; SkipIds=@(); Providers=$null },
+        @{ Name='Microsoft-Windows-WLAN-AutoConfig/Operational'; Levels=$null; SkipIds=@(); Providers=$null }
+    )
+
+    foreach ($c in $channelConfig) {
+        Add "--- $($c.Name) ---"
+        $filter = @{ LogName = $c.Name; StartTime = $since }
+        if ($c.Levels) { $filter.Level = $c.Levels }
+
+        $evts = $null
+        try {
+            $evts = Get-WinEvent -FilterHashtable $filter -MaxEvents 50 -ErrorAction Stop |
+                    Where-Object { $c.SkipIds -notcontains $_.Id } |
+                    Sort-Object TimeCreated
+        } catch {
+            if ($_.Exception.Message -match 'No events were found') {
+                Add "(no matching events in window)"
+            } else {
+                Add "(channel error: $($_.Exception.Message))"
+            }
+            Add ""
+            continue
+        }
+        if (-not $evts) {
+            Add "(no matching events in window)"
+        } else {
+            foreach ($e in $evts) {
+                $firstline = if ($e.Message) { ($e.Message -split "`r?`n" | Select-Object -First 1).Trim() } else { '' }
+                Add ("{0} [{1}] Id={2} {3}: {4}" -f
+                     $e.TimeCreated.ToString('HH:mm:ss'),
+                     $e.LevelDisplayName,
+                     $e.Id,
+                     $e.ProviderName,
+                     $firstline)
+            }
+        }
+        Add ""
+    }
+
+    try {
+        $sb.ToString() | Out-File -FilePath $out -Encoding utf8
+        Write-Log "SNAPSHOT written to $out"
+    } catch {
+        Write-Log "SNAPSHOT write failed: $($_.Exception.Message)"
+    }
+}
+
 function Get-HttpStatusOrError($url, $timeoutSec) {
     # Returns "<status-code>" on success, or a short symbolic error on failure.
     # Symbolic errors are normalized so log output stays grep-friendly.
@@ -164,14 +306,21 @@ function Update-CodeServerLogMirror {
 Update-CodeServerLogMirror
 Invoke-CloudflaredLogRotation
 
-$h = Get-StackHealth
+$h  = Get-StackHealth
+$mx = Get-CloudflaredMetricsSummary
 if ($h.Healthy) {
-    Write-Log "OK $($h.Summary)"
+    Write-Log "OK $($h.Summary) $mx"
     Send-Heartbeat 'ok'
     exit 0
 }
 
-Write-Log "UNHEALTHY $($h.Summary) -- invoking auto-start.ps1 -NoLogonDelay"
+Write-Log "UNHEALTHY $($h.Summary) $mx -- invoking auto-start.ps1 -NoLogonDelay"
+
+# Forensic capture BEFORE the heal mutates anything. Snapshots only land on
+# unhealthy cycles (rare), so disk impact is negligible. See RCA-008 for the
+# diagnostic gap this closes.
+Capture-FailureSnapshot $h.Summary
+
 $autoStart = Join-Path $PSScriptRoot "auto-start.ps1"
 try {
     & powershell -NoProfile -ExecutionPolicy Bypass -File $autoStart -NoLogonDelay 2>&1 |
@@ -186,13 +335,14 @@ try {
 # Re-probe to confirm recovery; mirror code-server log post-heal too.
 Start-Sleep 3
 Update-CodeServerLogMirror
-$h = Get-StackHealth
+$h  = Get-StackHealth
+$mx = Get-CloudflaredMetricsSummary
 if ($h.Healthy) {
-    Write-Log "RECOVERED $($h.Summary) (heal exit=$healExit)"
+    Write-Log "RECOVERED $($h.Summary) $mx (heal exit=$healExit)"
     Send-Heartbeat 'ok'
     exit 0
 } else {
-    Write-Log "STILL UNHEALTHY $($h.Summary) (heal exit=$healExit) -- will retry next cycle"
+    Write-Log "STILL UNHEALTHY $($h.Summary) $mx (heal exit=$healExit) -- will retry next cycle"
     Send-Heartbeat 'fail'
     exit 1
 }
